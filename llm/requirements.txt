@@ -1,0 +1,7 @@
+langchain
+openai
+python-dotenv
+beautifulsoup4
+unstructured
+chromadb
+tiktoken
