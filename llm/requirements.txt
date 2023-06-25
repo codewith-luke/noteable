@@ -5,3 +5,4 @@ beautifulsoup4
 unstructured
 chromadb
 tiktoken
+sentence_transformers

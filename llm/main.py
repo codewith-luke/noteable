@@ -3,8 +3,9 @@ from dotenv import load_dotenv
 from langchain import OpenAI
 from langchain.chains.question_answering import load_qa_chain
 from langchain.chat_models import ChatOpenAI
-from langchain.embeddings import OpenAIEmbeddings
+from langchain.embeddings import OpenAIEmbeddings, SentenceTransformerEmbeddings
 from langchain.document_loaders import DirectoryLoader, UnstructuredMarkdownLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
 
 import updater
@@ -12,22 +13,55 @@ import updater
 load_dotenv()
 
 api_key = os.getenv("OPENAI_API_KEY")
-# llm = OpenAI(openai_api_key=api_key, temperature=0, max_tokens=100)
-llm = ChatOpenAI(openai_api_key=api_key, temperature=0, max_tokens=100)
+llm = OpenAI(openai_api_key=api_key, temperature=0, max_tokens=100)
 embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
 
 
 def insert_documents():
-    loader = DirectoryLoader('./documents', glob="**/*.md")
+    loader = DirectoryLoader('./documents')
     loader_docs = loader.load()
-    ids = [loader_docs[i].metadata.get('source') for i in range(len(loader_docs))]
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=100,
+        chunk_overlap=20,
+        length_function=len,
+    )
+
+    for doc in loader_docs:
+        docs = text_splitter.create_documents([doc.page_content])
+        source = doc.metadata.get('source')
+
+        for split_doc in docs:
+            split_doc.metadata.update({'source': source})
+
+        print("inserting", source)
+        conn = Chroma.from_documents(
+            docs,
+            embeddings,
+            collection_name="documents",
+            persist_directory="./chroma_db",
+        )
+
+        conn.persist()
+
+
+def index_document(path):
+    file_name, file_extension = os.path.splitext(path)
+    doc = None
+
+    if file_extension == '.md':
+        loader = UnstructuredMarkdownLoader(path)
+        doc = loader.load()
+        doc[0].metadata.update({'source': file_name})
+
+    db = Chroma(collection_name="documents", persist_directory='chroma_db', embedding_function=embeddings)
+    db.update_document()
     conn = Chroma.from_documents(
-        loader_docs,
+        doc,
         embeddings,
         collection_name="documents",
         persist_directory="./chroma_db",
-        ids=ids
     )
+
     conn.persist()
 
 
@@ -39,15 +73,23 @@ def query_documents(message):
     print(res)
 
 
-def update_document(document_id):
+def find_document(message):
     db = Chroma(collection_name="documents", persist_directory='chroma_db', embedding_function=embeddings)
-    updater.update_doc()
-    loader = UnstructuredMarkdownLoader(document_id)
-    data = loader.load()
-    db.update_document(document_id, data[0])
-    db.persist()
+    docs = db.get(include=['metadatas'])
+    sources = []
+
+    for d in docs:
+        source = d.metadata.get('source')
+        if source not in sources:
+            sources.append(source)
+
+    print("found sources", sources)
+    return sources
 
 
+query = "When is my dentist appointment? And on what day?"
 # insert_documents()
-query_documents("When is my next dentist appointment?")
-# update_document("documents/test_document_3.md")
+# query_documents(query)
+# index_document('./documents/test_document_3.md')
+doc = find_document(query)
+
