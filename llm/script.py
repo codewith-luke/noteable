@@ -23,7 +23,7 @@ def myfunc(argv):
             arg_input = arg
 
     print("debug: handling message")
-    main.call(arg_input)
+    main.query_documents(arg_input)
 
 
 if __name__ == "__main__":

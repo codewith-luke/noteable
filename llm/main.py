@@ -2,13 +2,10 @@ import os
 from dotenv import load_dotenv
 from langchain import OpenAI
 from langchain.chains.question_answering import load_qa_chain
-from langchain.chat_models import ChatOpenAI
-from langchain.embeddings import OpenAIEmbeddings, SentenceTransformerEmbeddings
+from langchain.embeddings import OpenAIEmbeddings
 from langchain.document_loaders import DirectoryLoader, UnstructuredMarkdownLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
-
-import updater
 
 load_dotenv()
 
@@ -73,7 +70,7 @@ def query_documents(message):
     print(res)
 
 
-def find_document(message):
+def find_document():
     db = Chroma(collection_name="documents", persist_directory='chroma_db', embedding_function=embeddings)
     docs = db.get(include=['metadatas'])
     sources = []
@@ -87,9 +84,9 @@ def find_document(message):
     return sources
 
 
-query = "When is my dentist appointment? And on what day?"
+# query = "When is my dentist appointment? And on what day?"
 # insert_documents()
 # query_documents(query)
 # index_document('./documents/test_document_3.md')
-doc = find_document(query)
+# doc = find_document(query)
 
