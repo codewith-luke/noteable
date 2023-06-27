@@ -5,12 +5,15 @@ package main
 
 import (
 	"fmt"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"os"
 	"os/exec"
 	"strings"
-
-	tea "github.com/charmbracelet/bubbletea"
+	time "time"
 )
 
 type View string
@@ -21,7 +24,7 @@ type (
 
 const (
 	COMMAND_VIEW View = "COMMAND_VIEW"
-	QUERY_VIEW   View = "QUERY_VIEW"
+	CHAT_VIEW    View = "QUERY_VIEW"
 )
 
 var choices = []string{"Query", "Update"}
@@ -29,18 +32,22 @@ var choices = []string{"Query", "Update"}
 type model struct {
 	activeView View
 
-	textInput textinput.Model
-	cursor    int
-	choice    string
-	err       errMsg
+	viewport    viewport.Model
+	messages    []string
+	textarea    textarea.Model
+	senderStyle lipgloss.Style
+
+	cursor int
+	choice string
+	err    errMsg
 }
 
-func (m *model) Init() tea.Cmd {
+func (m model) Init() tea.Cmd {
 	// TODO: Figure out why this mofo don't blink
 	return textinput.Blink
 }
 
-func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	if m.activeView == COMMAND_VIEW {
@@ -54,7 +61,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Send the choice on the channel and exit.
 				m.choice = choices[m.cursor]
 				if m.choice == "Query" {
-					m.activeView = QUERY_VIEW
+					m.activeView = CHAT_VIEW
 				}
 
 			case "down", "j":
@@ -74,53 +81,109 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	} else {
+		var (
+			tiCmd tea.Cmd
+			vpCmd tea.Cmd
+		)
+
+		m.textarea, tiCmd = m.textarea.Update(msg)
+		m.viewport, vpCmd = m.viewport.Update(msg)
+
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
-			switch msg.String() {
-			case "ctrl+c", "q", "esc":
+			switch msg.Type {
+			case tea.KeyCtrlC, tea.KeyEsc:
+				fmt.Println(m.textarea.Value())
 				return m, tea.Quit
+			case tea.KeyEnter:
+				m.messages = append(m.messages, m.senderStyle.Render("You: ")+m.textarea.Value())
+				m.viewport.SetContent(strings.Join(m.messages, "\n"))
 
-			case "enter":
-				cmd := exec.Command("./llm/run.sh", m.textInput.Value())
-				stdout, err := cmd.Output()
+				ch := make(chan string)
 
-				if err != nil {
-					fmt.Println(err.Error())
-					return m, tea.Quit
+				go (func(msg string) {
+					cmd := exec.Command("./llm/run.sh", msg)
+					stdout, err := cmd.CombinedOutput()
+
+					if err != nil {
+						fmt.Println(err.Error())
+					}
+
+					ch <- string(stdout)
+				})(m.textarea.Value())
+
+				m.viewport.GotoBottom()
+				m.textarea.Reset()
+
+				select {
+				case <-time.After(5 * time.Second):
+					return m, tea.Batch(tiCmd, vpCmd)
+				case res := <-ch:
+					m.messages = append(m.messages, m.senderStyle.Render("Sys: ")+res)
+					m.viewport.SetContent(strings.Join(m.messages, "\n"))
+
+					return m, tea.Batch(tiCmd, vpCmd)
 				}
-
-				// Print the output
-				fmt.Println(string(stdout))
 			}
+
 		case errMsg:
 			m.err = msg
 			return m, nil
 		}
+
+		return m, tea.Batch(tiCmd, vpCmd)
 	}
 
-	m.textInput, cmd = m.textInput.Update(msg)
 	return m, cmd
 }
 
-func (m *model) View() string {
+func (m model) View() string {
 	switch m.activeView {
 	case COMMAND_VIEW:
 		view := renderCommandView(m)
 		return view.String()
-	case QUERY_VIEW:
-		return renderQueryView(m)
+	case CHAT_VIEW:
+		return renderChatView(m)
 	default:
 		return "unknown view"
 	}
 }
 
-func main() {
-	ti := textinput.New()
+func initialModel() model {
+	ta := textarea.New()
+	ta.Placeholder = "Send a message..."
+	ta.Focus()
 
-	p := tea.NewProgram(&model{
-		textInput:  ti,
-		activeView: QUERY_VIEW,
-	})
+	ta.Prompt = "┃ "
+	ta.CharLimit = 280
+
+	ta.SetWidth(20)
+	ta.SetHeight(3)
+
+	// Remove cursor line styling
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+
+	ta.ShowLineNumbers = false
+
+	vp := viewport.New(100, 20)
+	vp.SetContent(`Welcome to the chat room!
+Type a message and press Enter to send.`)
+
+	ta.KeyMap.InsertNewline.SetEnabled(false)
+
+	return model{
+		textarea:    ta,
+		messages:    []string{},
+		viewport:    vp,
+		senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
+		activeView:  COMMAND_VIEW,
+		err:         nil,
+	}
+}
+
+func main() {
+	appModel := initialModel()
+	p := tea.NewProgram(appModel)
 
 	// Run returns the model as a tea.Model.
 	m, err := p.Run()
@@ -135,7 +198,7 @@ func main() {
 	}
 }
 
-func renderCommandView(m *model) strings.Builder {
+func renderCommandView(m model) strings.Builder {
 	s := strings.Builder{}
 	s.WriteString("What kind of Bubble Tea would you like to order?\n\n")
 
@@ -153,15 +216,10 @@ func renderCommandView(m *model) strings.Builder {
 	return s
 }
 
-func renderQueryView(m *model) string {
-	m.textInput.CharLimit = 100
-	m.textInput.Width = 20
-	m.textInput.Focus()
-	m.textInput.Placeholder = "How do I make it blink?"
-
+func renderChatView(m model) string {
 	return fmt.Sprintf(
-		"What is your query?\n\n%s\n\n%s",
-		m.textInput.View(),
-		"(esc to quit)",
-	) + "\n"
+		"%s\n\n%s",
+		m.viewport.View(),
+		m.textarea.View(),
+	) + "\n\n"
 }

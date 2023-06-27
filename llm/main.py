@@ -1,18 +1,20 @@
 import os
 from dotenv import load_dotenv
-from langchain import OpenAI
+from langchain import OpenAI, LLMChain
+from langchain.callbacks import StreamingStdOutCallbackHandler
 from langchain.chains.question_answering import load_qa_chain
+from langchain.chat_models import ChatOpenAI
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.document_loaders import DirectoryLoader, UnstructuredMarkdownLoader
+from langchain.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate, ChatPromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
 
 load_dotenv()
 
 api_key = os.getenv("OPENAI_API_KEY")
-llm = OpenAI(openai_api_key=api_key, temperature=0, max_tokens=100)
+llm = OpenAI(openai_api_key=api_key, temperature=0, streaming=True, callbacks=[StreamingStdOutCallbackHandler()])
 embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
-
 
 def insert_documents():
     loader = DirectoryLoader('./documents')
