@@ -4,6 +4,7 @@ package main
 // program after the Bubble Tea has exited.
 
 import (
+	"bufio"
 	"fmt"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -13,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	time "time"
 )
 
 type View string
@@ -23,8 +23,10 @@ type (
 )
 
 const (
-	COMMAND_VIEW View = "COMMAND_VIEW"
-	CHAT_VIEW    View = "QUERY_VIEW"
+	CommandView View = "COMMAND_VIEW"
+	ChatView    View = "QUERY_VIEW"
+
+	TriggerQuestion = "trigger_question"
 )
 
 var choices = []string{"Query", "Update"}
@@ -36,21 +38,59 @@ type model struct {
 	messages    []string
 	textarea    textarea.Model
 	senderStyle lipgloss.Style
+	question    string
 
 	cursor int
 	choice string
 	err    errMsg
+
+	debugger *os.File
+}
+
+func (m model) debug(msg string) {
+	message := fmt.Sprintf("DEBUG: %s\n", msg)
+	m.debugger.WriteString(message)
 }
 
 func (m model) Init() tea.Cmd {
-	// TODO: Figure out why this mofo don't blink
 	return textinput.Blink
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
+	var (
+		cmd   tea.Cmd
+		tiCmd tea.Cmd
+		vpCmd tea.Cmd
+	)
 
-	if m.activeView == COMMAND_VIEW {
+	m.textarea, tiCmd = m.textarea.Update(msg)
+	m.viewport, vpCmd = m.viewport.Update(msg)
+
+	if msg == TriggerQuestion {
+		m.debug(m.question)
+		out := make(chan string)
+		done := make(chan bool)
+
+		go (func() {
+			m.debug("running script")
+			runScript(m.question, out, done)
+		})()
+
+		select {
+		case <-done:
+			m.debug("done")
+			m.question = ""
+			return m, tea.Batch(tiCmd, vpCmd, cmd)
+		case outM := <-out:
+			m.debug(outM)
+			m.messages = append(m.messages, m.senderStyle.Render("Sys:")+outM)
+			m.viewport.SetContent(strings.Join(m.messages, "\n"))
+			m.textarea.Reset()
+			m.viewport.GotoBottom()
+		}
+	}
+
+	if m.activeView == CommandView {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
@@ -61,7 +101,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Send the choice on the channel and exit.
 				m.choice = choices[m.cursor]
 				if m.choice == "Query" {
-					m.activeView = CHAT_VIEW
+					m.activeView = ChatView
 				}
 
 			case "down", "j":
@@ -81,57 +121,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	} else {
-		var (
-			tiCmd tea.Cmd
-			vpCmd tea.Cmd
-		)
-
-		m.textarea, tiCmd = m.textarea.Update(msg)
-		m.viewport, vpCmd = m.viewport.Update(msg)
-
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.Type {
 			case tea.KeyCtrlC, tea.KeyEsc:
-				fmt.Println(m.textarea.Value())
 				return m, tea.Quit
 			case tea.KeyEnter:
-				m.messages = append(m.messages, m.senderStyle.Render("You: ")+m.textarea.Value())
+				userMsg := m.textarea.Value()
+				m.messages = append(m.messages, m.senderStyle.Render("You: ")+userMsg)
+				m.messages = append(m.messages, m.senderStyle.Render("Sys: ")+"I'm thinking...")
 				m.viewport.SetContent(strings.Join(m.messages, "\n"))
-
-				ch := make(chan string)
-
-				go (func(msg string) {
-					cmd := exec.Command("./llm/run.sh", msg)
-					stdout, err := cmd.CombinedOutput()
-
-					if err != nil {
-						fmt.Println(err.Error())
-					}
-
-					ch <- string(stdout)
-				})(m.textarea.Value())
-
-				m.viewport.GotoBottom()
 				m.textarea.Reset()
-
-				select {
-				case <-time.After(5 * time.Second):
-					return m, tea.Batch(tiCmd, vpCmd)
-				case res := <-ch:
-					m.messages = append(m.messages, m.senderStyle.Render("Sys: ")+res)
-					m.viewport.SetContent(strings.Join(m.messages, "\n"))
-
-					return m, tea.Batch(tiCmd, vpCmd)
-				}
+				m.viewport.GotoBottom()
+				m.question = userMsg
+				return m, tea.Batch(tiCmd, vpCmd, func() tea.Msg {
+					return TriggerQuestion
+				})
 			}
 
 		case errMsg:
 			m.err = msg
 			return m, nil
 		}
-
-		return m, tea.Batch(tiCmd, vpCmd)
 	}
 
 	return m, cmd
@@ -139,10 +150,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	switch m.activeView {
-	case COMMAND_VIEW:
+	case CommandView:
 		view := renderCommandView(m)
 		return view.String()
-	case CHAT_VIEW:
+	case ChatView:
 		return renderChatView(m)
 	default:
 		return "unknown view"
@@ -150,6 +161,13 @@ func (m model) View() string {
 }
 
 func initialModel() model {
+	f, err := tea.LogToFile("debug.log", "debug")
+	f.Truncate(0)
+	if err != nil {
+		fmt.Println("fatal:", err)
+		os.Exit(1)
+	}
+
 	ta := textarea.New()
 	ta.Placeholder = "Send a message..."
 	ta.Focus()
@@ -157,7 +175,7 @@ func initialModel() model {
 	ta.Prompt = "┃ "
 	ta.CharLimit = 280
 
-	ta.SetWidth(20)
+	ta.SetWidth(50)
 	ta.SetHeight(3)
 
 	// Remove cursor line styling
@@ -176,8 +194,9 @@ Type a message and press Enter to send.`)
 		messages:    []string{},
 		viewport:    vp,
 		senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
-		activeView:  COMMAND_VIEW,
+		activeView:  CommandView,
 		err:         nil,
+		debugger:    f,
 	}
 }
 
@@ -185,6 +204,7 @@ func main() {
 	appModel := initialModel()
 	p := tea.NewProgram(appModel)
 
+	defer appModel.debugger.Close()
 	// Run returns the model as a tea.Model.
 	m, err := p.Run()
 	if err != nil {
@@ -222,4 +242,23 @@ func renderChatView(m model) string {
 		m.viewport.View(),
 		m.textarea.View(),
 	) + "\n\n"
+}
+
+func runScript(msg string, out chan string, done chan bool) {
+	cmd := exec.Command("./llm/run.sh", msg)
+	cmdReader, _ := cmd.StdoutPipe()
+	scanner := bufio.NewScanner(cmdReader)
+
+	cmd.Start()
+	for scanner.Scan() {
+		out <- scanner.Text()
+	}
+
+	err := cmd.Wait()
+
+	done <- true
+
+	if err != nil {
+		fmt.Printf("cmd.Run() failed with %s\n", err)
+	}
 }

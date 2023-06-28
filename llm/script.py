@@ -10,7 +10,6 @@ def myfunc(argv):
 
     try:
         opts, args = getopt.getopt(argv[1:], "hi:u:o:", ["help", "input="])
-
     except:
         print(arg_help)
         sys.exit(2)
@@ -22,7 +21,6 @@ def myfunc(argv):
         elif opt in ("-i", "--input"):
             arg_input = arg
 
-    print("debug: handling message")
     main.query_documents(arg_input)
 
 
